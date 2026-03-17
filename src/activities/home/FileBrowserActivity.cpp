@@ -202,9 +202,12 @@ void FileBrowserActivity::onExit() {
 }
 
 void FileBrowserActivity::clearFileMetadata(const std::string& fullPath) {
-  // Only clear cache for .epub files
+  // Only clear cache for .epub and .xtc files
   if (FsHelpers::hasEpubExtension(fullPath)) {
     Epub(fullPath, "/.crosspoint").clearCache();
+    LOG_DBG("FileBrowser", "Cleared metadata cache for: %s", fullPath.c_str());
+  } else if (FsHelpers::hasXtcExtension(fullPath)) {
+    Xtc(fullPath, "/.crosspoint").clearCache();
     LOG_DBG("FileBrowser", "Cleared metadata cache for: %s", fullPath.c_str());
   }
 }
