@@ -600,9 +600,9 @@ void BaseTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
 }
 
 void BaseTheme::drawCoverList(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
-                             const std::function<std::string(int index)>& rowTitle,
-                             const std::function<std::string(int index)>& rowAuthor,
-                             const std::function<std::string(int index)>& rowPath) const {
+                              const std::function<std::string(int index)>& rowTitle,
+                              const std::function<std::string(int index)>& rowAuthor,
+                              const std::function<std::string(int index)>& rowPath) const {
   const int itemsPerPage = BaseMetrics::values.coverListItemsPerPage;
   const int spacing = BaseMetrics::values.coverListSpacing;
 

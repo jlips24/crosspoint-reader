@@ -605,8 +605,7 @@ void LyraTheme::drawCoverList(const GfxRenderer& renderer, Rect rect, int itemCo
     // Title
     std::string title = rowTitle(currentIndex);
     if (!title.empty()) {
-      auto truncatedTitle =
-          renderer.truncatedText(UI_12_FONT_ID, title.c_str(), textWidth, EpdFontFamily::BOLD);
+      auto truncatedTitle = renderer.truncatedText(UI_12_FONT_ID, title.c_str(), textWidth, EpdFontFamily::BOLD);
       renderer.drawText(UI_12_FONT_ID, textX, y + 12, truncatedTitle.c_str(), true, EpdFontFamily::BOLD);
     }
 

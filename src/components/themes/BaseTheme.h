@@ -150,7 +150,8 @@ class BaseTheme {
   virtual void drawHelpText(const GfxRenderer& renderer, Rect rect, const char* label) const;
   virtual void drawTextField(const GfxRenderer& renderer, Rect rect, const int textWidth) const;
   virtual void drawKeyboardKey(const GfxRenderer& renderer, Rect rect, const char* label, const bool isSelected) const;
-  protected:
-    virtual void drawCoverThumbnail(const GfxRenderer& renderer, int x, int y, int maxWidth, int maxHeight,
-                                    const std::string& path, bool selected) const;
+
+ protected:
+  virtual void drawCoverThumbnail(const GfxRenderer& renderer, int x, int y, int maxWidth, int maxHeight,
+                                  const std::string& path, bool selected) const;
 };

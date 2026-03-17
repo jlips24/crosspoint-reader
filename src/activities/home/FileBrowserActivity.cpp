@@ -355,9 +355,9 @@ void FileBrowserActivity::renderList(const ThemeMetrics& metrics, int pageWidth,
     renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, contentTop + 20, tr(STR_NO_FILES_FOUND));
   } else {
     GUI.drawList(
-      renderer, Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(files.size()),
-      static_cast<int>(selectorIndex), [this](int index) { return getFileName(files[index]); }, nullptr,
-      [this](int index) { return UITheme::getFileIcon(files[index]); });
+        renderer, Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(files.size()),
+        static_cast<int>(selectorIndex), [this](int index) { return getFileName(files[index]); }, nullptr,
+        [this](int index) { return UITheme::getFileIcon(files[index]); });
   }
 }
 
