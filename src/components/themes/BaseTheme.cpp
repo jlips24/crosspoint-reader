@@ -602,8 +602,7 @@ void BaseTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
 void BaseTheme::drawCoverList(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
                              const std::function<std::string(int index)>& rowTitle,
                              const std::function<std::string(int index)>& rowAuthor,
-                             const std::function<std::string(int index)>& rowPath,
-                             const std::function<UIIcon(int index)>& rowStatusIcon) const {
+                             const std::function<std::string(int index)>& rowPath) const {
   const int itemsPerPage = BaseMetrics::values.coverListItemsPerPage;
   const int spacing = BaseMetrics::values.coverListSpacing;
 
@@ -638,11 +637,24 @@ void BaseTheme::drawCoverList(const GfxRenderer& renderer, Rect rect, int itemCo
     std::string path = rowPath(currentIndex);
     drawCoverThumbnail(renderer, coverX, coverY, coverWidthMax, coverHeightMax, path, selected);
 
-  // Text Area
+    // Text Area
+    const int textX = coverX + coverWidthMax + 8;
+    const int textWidth = itemWidth - textX - 10;
 
-  // Title
+    // Title
+    std::string title = rowTitle(currentIndex);
+    if (!title.empty()) {
+      auto truncatedTitle = renderer.truncatedText(UI_12_FONT_ID, title.c_str(), textWidth);
+      renderer.drawText(UI_12_FONT_ID, textX, y + 10, truncatedTitle.c_str(), !selected);
+    }
 
-  // Author
+    // Author
+    std::string author = rowAuthor(currentIndex);
+    if (!author.empty()) {
+      auto truncatedAuthor = renderer.truncatedText(UI_10_FONT_ID, author.c_str(), textWidth);
+      renderer.drawText(UI_10_FONT_ID, textX, y + 10 + renderer.getLineHeight(UI_12_FONT_ID) + 2,
+                        truncatedAuthor.c_str(), !selected);
+    }
   }
 }
 

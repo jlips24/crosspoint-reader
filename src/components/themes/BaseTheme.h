@@ -141,8 +141,7 @@ class BaseTheme {
   virtual void drawCoverList(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
                              const std::function<std::string(int index)>& rowTitle,
                              const std::function<std::string(int index)>& rowAuthor,
-                             const std::function<std::string(int index)>& rowPath,
-                             const std::function<UIIcon(int index)>& rowStatusIcon) const;
+                             const std::function<std::string(int index)>& rowPath) const;
   virtual Rect drawPopup(const GfxRenderer& renderer, const char* message) const;
   virtual void fillPopupProgress(const GfxRenderer& renderer, const Rect& layout, const int progress) const;
   virtual void drawStatusBar(GfxRenderer& renderer, const float bookProgress, const int currentPage,

@@ -12,6 +12,11 @@ struct ThemeMetrics;
 
 class FileBrowserActivity final : public Activity {
  private:
+  struct FileMetadata {
+    std::string title;
+    std::string author;
+  };
+
   // Deletion
   void clearFileMetadata(const std::string& fullPath);
 
@@ -22,13 +27,14 @@ class FileBrowserActivity final : public Activity {
   // Files state
   std::string basepath = "/";
   std::vector<std::string> files;
+  std::vector<FileMetadata> filesMetadata;
 
   // Data loading
   void loadFiles();
   size_t findEntry(const std::string& name) const;
 
   void renderList(const ThemeMetrics& metrics, int pageWidth, int pageHeight);
-//   void renderCoverList(const ThemeMetrics& metrics, int pageWidth, int pageHeight);
+  void renderCoverList(const ThemeMetrics& metrics, int pageWidth, int pageHeight);
 
  public:
   explicit FileBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string initialPath = "/")

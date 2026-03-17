@@ -5,6 +5,7 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <Xtc.h>
 
 #include <algorithm>
 
@@ -102,6 +103,43 @@ void FileBrowserActivity::loadFiles() {
   }
   root.close();
   sortFileList(files);
+
+  // Pre-load metadata for cover list mode
+  filesMetadata.clear();
+  filesMetadata.resize(files.size());
+
+  for (size_t i = 0; i < files.size(); i++) {
+    const std::string& filename = files[i];
+    std::string cleanBasePath = basepath;
+    if (cleanBasePath.back() != '/') cleanBasePath += "/";
+    const std::string fullPath = cleanBasePath + filename;
+
+    if (filename.back() == '/') {
+      filesMetadata[i].title = filename.substr(0, filename.length() - 1);
+    } else if (FsHelpers::hasEpubExtension(filename)) {
+      Epub epub(fullPath, "/.crosspoint");
+      if (epub.load(false, true)) {
+        filesMetadata[i].title = epub.getTitle();
+        filesMetadata[i].author = epub.getAuthor();
+
+        if (SETTINGS.fileBrowserViewMode == CrossPointSettings::VIEW_COVERS) {
+          epub.generateThumbBmp(213);
+        }
+      } else {
+        filesMetadata[i].title = filename.substr(0, filename.find_last_of('.'));
+      }
+    } else if (FsHelpers::hasXtcExtension(filename)) {
+      Xtc xtc(fullPath, "/.crosspoint");
+      if (xtc.load()) {
+        filesMetadata[i].title = xtc.getTitle();
+        filesMetadata[i].author = xtc.getAuthor();
+      } else {
+        filesMetadata[i].title = filename.substr(0, filename.find_last_of('.'));
+      }
+    } else {
+      filesMetadata[i].title = filename.substr(0, filename.find_last_of('.'));
+    }
+  }
 }
 
 void FileBrowserActivity::onEnter() {
@@ -256,9 +294,9 @@ void FileBrowserActivity::render(RenderLock&&) {
 
   if (SETTINGS.fileBrowserViewMode == CrossPointSettings::VIEW_LIST) {
     renderList(metrics, pageWidth, pageHeight);
-  } //else {
-    //renderCovers(metrics, pageWidth, pageHeight);
-  //}
+  } else {
+    renderCoverList(metrics, pageWidth, pageHeight);
+  }
 
   // Help text
   const auto labels =
@@ -280,6 +318,28 @@ void FileBrowserActivity::renderList(const ThemeMetrics& metrics, int pageWidth,
       renderer, Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(files.size()),
       static_cast<int>(selectorIndex), [this](int index) { return getFileName(files[index]); }, nullptr,
       [this](int index) { return UITheme::getFileIcon(files[index]); });
+  }
+}
+
+void FileBrowserActivity::renderCoverList(const ThemeMetrics& metrics, int pageWidth, int pageHeight) {
+  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
+
+  if (files.empty()) {
+    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, contentTop + 20, tr(STR_NO_FILES_FOUND));
+  } else {
+    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
+                   ((basepath == "/") ? tr(STR_SD_CARD) : basepath.substr(basepath.rfind('/') + 1)).c_str());
+
+    GUI.drawCoverList(
+        renderer, Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(files.size()),
+        static_cast<int>(selectorIndex), [this](int index) { return filesMetadata[index].title; },
+        [this](int index) { return filesMetadata[index].author; },
+        [this](int index) {
+          std::string cleanBasePath = basepath;
+          if (cleanBasePath.back() != '/') cleanBasePath += "/";
+          return cleanBasePath + files[index];
+        });
   }
 }
 
