@@ -1,5 +1,7 @@
 #include "BaseTheme.h"
 
+#include <Bitmap.h>
+#include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalPowerManager.h>
 #include <HalStorage.h>
@@ -11,6 +13,7 @@
 #include "I18n.h"
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
+#include "components/icons/book.h"
 #include "fontIds.h"
 
 // Internal constants
@@ -594,6 +597,89 @@ void BaseTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
     // Invert text when the tile is selected, to contrast with the filled background
     renderer.drawText(UI_10_FONT_ID, textX, textY, label, selectedIndex != i);
   }
+}
+
+void BaseTheme::drawCoverList(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
+                             const std::function<std::string(int index)>& rowTitle,
+                             const std::function<std::string(int index)>& rowAuthor,
+                             const std::function<std::string(int index)>& rowPath,
+                             const std::function<UIIcon(int index)>& rowStatusIcon) const {
+  const int itemsPerPage = BaseMetrics::values.coverListItemsPerPage;
+  const int spacing = BaseMetrics::values.coverListSpacing;
+
+  const int pageIndex = (selectedIndex >= 0) ? (selectedIndex / itemsPerPage) : 0;
+  const int startIndex = pageIndex * itemsPerPage;
+
+  const int itemWidth = rect.width;
+  const int itemHeight = (rect.height - (itemsPerPage - 1) * spacing) / itemsPerPage;
+
+  for (int i = 0; i < itemsPerPage && (startIndex + i) < itemCount; i++) {
+    const int currentIndex = startIndex + i;
+    const int x = rect.x;
+    const int y = rect.y + i * (itemHeight + spacing);
+
+    const bool selected = (currentIndex == selectedIndex);
+
+    if (selected) {
+      renderer.fillRect(x, y, itemWidth, itemHeight);
+    } else {
+      renderer.drawRect(x, y, itemWidth, itemHeight);
+    }
+
+    // Cover area
+    const int coverPadding = 2;
+    const int rowHeight = itemHeight;
+    const int coverHeightMax = rowHeight - (coverPadding * 2);
+    const int coverWidthMax = static_cast<int>(coverHeightMax * 0.75);  // Reserved width
+
+    const int coverX = x + 4;
+    const int coverY = y + coverPadding;
+
+    std::string path = rowPath(currentIndex);
+    drawCoverThumbnail(renderer, coverX, coverY, coverWidthMax, coverHeightMax, path, selected);
+
+  // Text Area
+
+  // Title
+
+  // Author
+  }
+}
+
+void BaseTheme::drawCoverThumbnail(const GfxRenderer& renderer, int x, int y, int maxWidth, int maxHeight,
+                                   const std::string& path, bool selected) const {
+  if (FsHelpers::hasEpubExtension(path) || FsHelpers::hasXtcExtension(path)) {
+    const std::string cachePath = FsHelpers::getCachePath(path);
+    const std::string thumbPaths[] = {
+        cachePath + "/thumb_" + std::to_string(maxWidth) + "x" + std::to_string(maxHeight) + ".bmp",
+        cachePath + "/thumb_226.bmp", cachePath + "/thumb_400.bmp"};
+
+    for (const auto& thumbPath : thumbPaths) {
+      FsFile file;
+      if (Storage.openFileForRead("GRID", thumbPath, file)) {
+        Bitmap bitmap(file);
+        if (bitmap.parseHeaders() == BmpReaderError::Ok) {
+          float scale = std::min({1.0f, (float)maxWidth / bitmap.getWidth(), (float)maxHeight / bitmap.getHeight()});
+          int finalW = bitmap.getWidth() * scale;
+          int finalH = bitmap.getHeight() * scale;
+          int drawX = x + (maxWidth - finalW) / 2;
+          int drawY = y + (maxHeight - finalH) / 2;
+
+          if (selected) renderer.fillRect(drawX, drawY, finalW, finalH, false);
+          renderer.drawBitmap(bitmap, drawX, drawY, finalW, finalH);
+          renderer.drawRect(drawX, drawY, finalW, finalH, !selected);
+          file.close();
+          return;
+        }
+        file.close();
+      }
+    }
+  }
+
+  // Fallback for folders or missing covers
+  if (selected) renderer.fillRect(x, y, maxWidth, maxHeight, false);
+  renderer.drawRect(x, y, maxWidth, maxHeight, !selected);
+  renderer.drawIcon(BookIcon, x + (maxWidth - 32) / 2, y + (maxHeight - 32) / 2, 32, 32);
 }
 
 Rect BaseTheme::drawPopup(const GfxRenderer& renderer, const char* message) const {

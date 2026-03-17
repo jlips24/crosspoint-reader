@@ -62,6 +62,9 @@ struct ThemeMetrics {
   int keyboardKeySpacing;
   bool keyboardBottomAligned;
   bool keyboardCenteredText;
+
+  int coverListItemsPerPage;
+  int coverListSpacing;
 };
 
 enum UIIcon { Folder, Text, Image, Book, File, Recent, Settings, Transfer, Library, Wifi, Hotspot };
@@ -99,7 +102,9 @@ constexpr ThemeMetrics values = {.batteryWidth = 15,
                                  .keyboardKeyHeight = 30,
                                  .keyboardKeySpacing = 10,
                                  .keyboardBottomAligned = false,
-                                 .keyboardCenteredText = false};
+                                 .keyboardCenteredText = false,
+                                 .coverListItemsPerPage = 3,
+                                 .coverListSpacing = 4};
 }
 
 class BaseTheme {
@@ -133,6 +138,11 @@ class BaseTheme {
   virtual void drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                               const std::function<std::string(int index)>& buttonLabel,
                               const std::function<UIIcon(int index)>& rowIcon) const;
+  virtual void drawCoverList(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
+                             const std::function<std::string(int index)>& rowTitle,
+                             const std::function<std::string(int index)>& rowAuthor,
+                             const std::function<std::string(int index)>& rowPath,
+                             const std::function<UIIcon(int index)>& rowStatusIcon) const;
   virtual Rect drawPopup(const GfxRenderer& renderer, const char* message) const;
   virtual void fillPopupProgress(const GfxRenderer& renderer, const Rect& layout, const int progress) const;
   virtual void drawStatusBar(GfxRenderer& renderer, const float bookProgress, const int currentPage,
@@ -141,4 +151,7 @@ class BaseTheme {
   virtual void drawHelpText(const GfxRenderer& renderer, Rect rect, const char* label) const;
   virtual void drawTextField(const GfxRenderer& renderer, Rect rect, const int textWidth) const;
   virtual void drawKeyboardKey(const GfxRenderer& renderer, Rect rect, const char* label, const bool isSelected) const;
+  protected:
+    virtual void drawCoverThumbnail(const GfxRenderer& renderer, int x, int y, int maxWidth, int maxHeight,
+                                    const std::string& path, bool selected) const;
 };
