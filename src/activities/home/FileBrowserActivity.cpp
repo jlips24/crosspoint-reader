@@ -273,7 +273,7 @@ void FileBrowserActivity::renderList(const ThemeMetrics& metrics, int pageWidth,
   const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
   const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
 
-  if (true) {//(files.empty()) {
+  if (files.empty()) {
     renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, contentTop + 20, tr(STR_NO_FILES_FOUND));
   } else {
     GUI.drawList(
