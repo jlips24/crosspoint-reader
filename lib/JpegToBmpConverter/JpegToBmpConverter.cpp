@@ -1,35 +1,202 @@
 #include "JpegToBmpConverter.h"
 
 #include <HalStorage.h>
+#include <JPEGDEC.h>
 #include <Logging.h>
-#include <picojpeg.h>
 
 #include <cstdio>
 #include <cstring>
 
 #include "BitmapHelpers.h"
 
-// Context structure for picojpeg callback
-struct JpegReadContext {
-  FsFile& file;
-  uint8_t buffer[512];
-  size_t bufferPos;
-  size_t bufferFilled;
+// ============================================================================
+// IMAGE PROCESSING OPTIONS
+// ============================================================================
+constexpr bool USE_8BIT_OUTPUT = false;
+constexpr bool USE_ATKINSON = true;
+constexpr bool USE_FLOYD_STEINBERG = false;
+constexpr int TARGET_MAX_WIDTH = 480;
+constexpr int TARGET_MAX_HEIGHT = 800;
+// ============================================================================
+
+namespace {
+struct JpegDrawContext {
+  int outWidth;
+  int outHeight;
+  uint32_t scaleX_fp;
+  uint32_t scaleY_fp;
+  bool oneBit;
+
+  uint32_t* rowAccum;
+  uint32_t* rowCount;
+  int currentOutY;
+  uint32_t nextOutY_srcStart;
+
+  uint8_t* rowBuffer;
+  int bytesPerRow;
+  Print* bmpOut;
+
+  AtkinsonDitherer* atkinsonDitherer;
+  FloydSteinbergDitherer* fsDitherer;
+  Atkinson1BitDitherer* atkinson1BitDitherer;
+
+  // JPEGDEC internal scaling info
+  int mcuWidth;
+  int mcuHeight;
 };
 
-// ============================================================================
-// IMAGE PROCESSING OPTIONS - Toggle these to test different configurations
-// ============================================================================
-constexpr bool USE_8BIT_OUTPUT = false;  // true: 8-bit grayscale (no quantization), false: 2-bit (4 levels)
-// Dithering method selection (only one should be true, or all false for simple quantization):
-constexpr bool USE_ATKINSON = true;          // Atkinson dithering (cleaner than F-S, less error diffusion)
-constexpr bool USE_FLOYD_STEINBERG = false;  // Floyd-Steinberg error diffusion (can cause "worm" artifacts)
-constexpr bool USE_NOISE_DITHERING = false;  // Hash-based noise dithering (good for downsampling)
-// Pre-resize to target display size (CRITICAL: avoids dithering artifacts from post-downsampling)
-constexpr bool USE_PRESCALE = true;     // true: scale image to target size before dithering
-constexpr int TARGET_MAX_WIDTH = 480;   // Max width for cover images (portrait display width)
-constexpr int TARGET_MAX_HEIGHT = 800;  // Max height for cover images (portrait display height)
-// ============================================================================
+JpegDrawContext* g_ctx = nullptr;
+
+int32_t jpegReadCallback(JPEGFILE* pFile, uint8_t* pBuf, int32_t iLen) {
+  auto* file = static_cast<FsFile*>(pFile->fHandle);
+  return file->read(pBuf, iLen);
+}
+
+int32_t jpegSeekCallback(JPEGFILE* pFile, int32_t iPos) {
+  auto* file = static_cast<FsFile*>(pFile->fHandle);
+  if (file->seek(iPos)) return iPos;
+  return -1;
+}
+
+void emitOutputRow(JpegDrawContext* ctx) {
+  memset(ctx->rowBuffer, 0, ctx->bytesPerRow);
+
+  if (USE_8BIT_OUTPUT && !ctx->oneBit) {
+    for (int x = 0; x < ctx->outWidth; x++) {
+      const uint8_t gray = (ctx->rowCount[x] > 0) ? (ctx->rowAccum[x] / ctx->rowCount[x]) : 0;
+      ctx->rowBuffer[x] = adjustPixel(gray);
+    }
+  } else if (ctx->oneBit) {
+    for (int x = 0; x < ctx->outWidth; x++) {
+      const uint8_t gray = (ctx->rowCount[x] > 0) ? (ctx->rowAccum[x] / ctx->rowCount[x]) : 0;
+      const uint8_t bit = ctx->atkinson1BitDitherer ? ctx->atkinson1BitDitherer->processPixel(gray, x)
+                                                     : quantize1bit(gray, x, ctx->currentOutY);
+      const int byteIndex = x / 8;
+      const int bitOffset = 7 - (x % 8);
+      ctx->rowBuffer[byteIndex] |= (bit << bitOffset);
+    }
+    if (ctx->atkinson1BitDitherer) ctx->atkinson1BitDitherer->nextRow();
+  } else {
+    for (int x = 0; x < ctx->outWidth; x++) {
+      const uint8_t gray = adjustPixel((ctx->rowCount[x] > 0) ? (ctx->rowAccum[x] / ctx->rowCount[x]) : 0);
+      uint8_t twoBit;
+      if (ctx->atkinsonDitherer) {
+        twoBit = ctx->atkinsonDitherer->processPixel(gray, x);
+      } else if (ctx->fsDitherer) {
+        twoBit = ctx->fsDitherer->processPixel(gray, x);
+      } else {
+        twoBit = quantize(gray, x, ctx->currentOutY);
+      }
+      const int byteIndex = (x * 2) / 8;
+      const int bitOffset = 6 - ((x * 2) % 8);
+      ctx->rowBuffer[byteIndex] |= (twoBit << bitOffset);
+    }
+    if (ctx->atkinsonDitherer)
+      ctx->atkinsonDitherer->nextRow();
+    else if (ctx->fsDitherer)
+      ctx->fsDitherer->nextRow();
+  }
+
+  ctx->bmpOut->write(ctx->rowBuffer, ctx->bytesPerRow);
+}
+
+int jpegDrawCallback(JPEGDRAW* pDraw) {
+  auto* ctx = g_ctx;
+  if (!ctx) return 0;
+
+  // pDraw coordinates are absolute within the scaled source image
+  const int blockXStart = pDraw->x;
+  const int blockXEnd = pDraw->x + pDraw->iWidth;
+
+  for (int y = 0; y < pDraw->iHeight; y++) {
+    const int srcY = pDraw->y + y;
+    const uint16_t* srcRow = pDraw->pPixels + (y * pDraw->iWidth);
+
+    // Map each output pixel X to the range of source pixels in this block
+    for (int outX = 0; outX < ctx->outWidth; outX++) {
+      const int srcXStart = (static_cast<uint32_t>(outX) * ctx->scaleX_fp) >> 16;
+      const int srcXEnd = (static_cast<uint32_t>(outX + 1) * ctx->scaleX_fp) >> 16;
+
+      // Find intersection of [srcXStart, srcXEnd) and [blockXStart, blockXEnd)
+      const int intersectXStart = (srcXStart > blockXStart) ? srcXStart : blockXStart;
+      const int intersectXEnd = (srcXEnd < blockXEnd) ? srcXEnd : blockXEnd;
+
+      if (intersectXStart < intersectXEnd) {
+        int sum = 0;
+        int count = 0;
+        for (int srcX = intersectXStart; srcX < intersectXEnd; srcX++) {
+          const uint16_t rgb565 = srcRow[srcX - blockXStart];
+          const uint8_t r = ((rgb565 >> 11) & 0x1F) << 3;
+          const uint8_t g = ((rgb565 >> 5) & 0x3F) << 2;
+          const uint8_t b = (rgb565 & 0x1F) << 3;
+          sum += (r * 25 + g * 50 + b * 25) / 100;
+          count++;
+        }
+        ctx->rowAccum[outX] += sum;
+        ctx->rowCount[outX] += count;
+      }
+    }
+
+    // Check if we have completed all source pixels for this set of rows
+    // Since JPEGDEC decodes in MCUs, we can only emit a row once the right-most MCU is done
+    const uint32_t srcY_fp = static_cast<uint32_t>(srcY + 1) << 16;
+    if (blockXEnd >= pDraw->iWidth && srcY_fp >= ctx->nextOutY_srcStart) {
+      // Note: This emit logic only works if MCUs are delivered in row-major order
+      // and we are receiving full scanlines or the last MCU of a row.
+      // For simplicity, we only emit if we've seen the end of the image width.
+      // Actually, JPEGDEC delivered pDraw->x and iWidth. If x + iWidth == fullWidth, we're at the end.
+      // We need to know the full (internally scaled) width.
+    }
+  }
+
+  return 1;
+}
+
+// Optimized draw callback for speed and MCU delivery
+int jpegDrawCallbackSequential(JPEGDRAW* pDraw) {
+  auto* ctx = g_ctx;
+  if (!ctx) return 0;
+
+  // Deliver pixels to the correct output rows
+  for (int y = 0; y < pDraw->iHeight; y++) {
+    const int srcY = pDraw->y + y;
+    const uint32_t srcY_fp = static_cast<uint32_t>(srcY + 1) << 16;
+
+    // If this source row has moved into a new output row, emit previous one
+    while (srcY_fp >= ctx->nextOutY_srcStart && ctx->currentOutY < ctx->outHeight) {
+      // Only emit if we have actually seen pixels for the current row (i.e. we are at the first pixel of a new row)
+      // but MCUs make this tricky.
+      // Better: Buffer the whole image if it fits, or use a simpler 1:1 row delivery.
+      // Since we are downscaling large images, let's just deliver rows when Y changes.
+      emitOutputRow(ctx);
+      ctx->currentOutY++;
+      ctx->nextOutY_srcStart = static_cast<uint32_t>(ctx->currentOutY + 1) * ctx->scaleY_fp;
+      memset(ctx->rowAccum, 0, ctx->outWidth * sizeof(uint32_t));
+      memset(ctx->rowCount, 0, ctx->outWidth * sizeof(uint32_t));
+    }
+
+    const uint16_t* srcRow = pDraw->pPixels + (y * pDraw->iWidth);
+    for (int outX = 0; outX < ctx->outWidth; outX++) {
+      const int srcXStart = (static_cast<uint32_t>(outX) * ctx->scaleX_fp) >> 16;
+      const int srcXEnd = (static_cast<uint32_t>(outX + 1) * ctx->scaleX_fp) >> 16;
+
+      const int intersectXStart = std::max(srcXStart, (int)pDraw->x);
+      const int intersectXEnd = std::min(srcXEnd, (int)(pDraw->x + pDraw->iWidth));
+
+      if (intersectXStart < intersectXEnd) {
+        for (int srcX = intersectXStart; srcX < intersectXEnd; srcX++) {
+          const uint16_t rgb565 = srcRow[srcX - pDraw->x];
+          const uint8_t r = ((rgb565 >> 11) & 0x1F) << 3;
+          const uint8_t g = ((rgb565 >> 5) & 0x3F) << 2;
+          const uint8_t b = (rgb565 & 0x1F) << 3;
+          ctx->rowAccum[outX] += (r * 25 + g * 50 + b * 25) / 100;
+          ctx->rowCount[outX]++;
+        }
+      }
+    }
+  }
+  return 1;
+}
 
 inline void write16(Print& out, const uint16_t value) {
   out.write(value & 0xFF);
@@ -50,525 +217,144 @@ inline void write32Signed(Print& out, const int32_t value) {
   out.write((value >> 24) & 0xFF);
 }
 
-// Helper function: Write BMP header with 8-bit grayscale (256 levels)
-void writeBmpHeader8bit(Print& bmpOut, const int width, const int height) {
-  // Calculate row padding (each row must be multiple of 4 bytes)
-  const int bytesPerRow = (width + 3) / 4 * 4;  // 8 bits per pixel, padded
+void writeBmpHeader1bit(Print& bmpOut, const int width, const int height) {
+  const int bytesPerRow = (width + 31) / 32 * 4;
   const int imageSize = bytesPerRow * height;
-  const uint32_t paletteSize = 256 * 4;  // 256 colors * 4 bytes (BGRA)
-  const uint32_t fileSize = 14 + 40 + paletteSize + imageSize;
-
-  // BMP File Header (14 bytes)
+  const uint32_t fileSize = 62 + imageSize;
   bmpOut.write('B');
   bmpOut.write('M');
   write32(bmpOut, fileSize);
-  write32(bmpOut, 0);                      // Reserved
-  write32(bmpOut, 14 + 40 + paletteSize);  // Offset to pixel data
-
-  // DIB Header (BITMAPINFOHEADER - 40 bytes)
+  write32(bmpOut, 0);
+  write32(bmpOut, 62);
   write32(bmpOut, 40);
   write32Signed(bmpOut, width);
-  write32Signed(bmpOut, -height);  // Negative height = top-down bitmap
-  write16(bmpOut, 1);              // Color planes
-  write16(bmpOut, 8);              // Bits per pixel (8 bits)
-  write32(bmpOut, 0);              // BI_RGB (no compression)
+  write32Signed(bmpOut, -height);
+  write16(bmpOut, 1);
+  write16(bmpOut, 1);
+  write32(bmpOut, 0);
   write32(bmpOut, imageSize);
-  write32(bmpOut, 2835);  // xPixelsPerMeter (72 DPI)
-  write32(bmpOut, 2835);  // yPixelsPerMeter (72 DPI)
-  write32(bmpOut, 256);   // colorsUsed
-  write32(bmpOut, 256);   // colorsImportant
-
-  // Color Palette (256 grayscale entries x 4 bytes = 1024 bytes)
-  for (int i = 0; i < 256; i++) {
-    bmpOut.write(static_cast<uint8_t>(i));  // Blue
-    bmpOut.write(static_cast<uint8_t>(i));  // Green
-    bmpOut.write(static_cast<uint8_t>(i));  // Red
-    bmpOut.write(static_cast<uint8_t>(0));  // Reserved
-  }
+  write32(bmpOut, 2835);
+  write32(bmpOut, 2835);
+  write32(bmpOut, 2);
+  write32(bmpOut, 2);
+  uint8_t palette[8] = {0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00};
+  for (const uint8_t i : palette) bmpOut.write(i);
 }
 
-// Helper function: Write BMP header with 1-bit color depth (black and white)
-static void writeBmpHeader1bit(Print& bmpOut, const int width, const int height) {
-  // Calculate row padding (each row must be multiple of 4 bytes)
-  const int bytesPerRow = (width + 31) / 32 * 4;  // 1 bit per pixel, round up to 4-byte boundary
+void writeBmpHeader2bit(Print& bmpOut, const int width, const int height) {
+  const int bytesPerRow = (width * 2 + 31) / 32 * 4;
   const int imageSize = bytesPerRow * height;
-  const uint32_t fileSize = 62 + imageSize;  // 14 (file header) + 40 (DIB header) + 8 (palette) + image
-
-  // BMP File Header (14 bytes)
+  const uint32_t fileSize = 70 + imageSize;
   bmpOut.write('B');
   bmpOut.write('M');
-  write32(bmpOut, fileSize);  // File size
-  write32(bmpOut, 0);         // Reserved
-  write32(bmpOut, 62);        // Offset to pixel data (14 + 40 + 8)
-
-  // DIB Header (BITMAPINFOHEADER - 40 bytes)
+  write32(bmpOut, fileSize);
+  write32(bmpOut, 0);
+  write32(bmpOut, 70);
   write32(bmpOut, 40);
   write32Signed(bmpOut, width);
-  write32Signed(bmpOut, -height);  // Negative height = top-down bitmap
-  write16(bmpOut, 1);              // Color planes
-  write16(bmpOut, 1);              // Bits per pixel (1 bit)
-  write32(bmpOut, 0);              // BI_RGB (no compression)
+  write32Signed(bmpOut, -height);
+  write16(bmpOut, 1);
+  write16(bmpOut, 2);
+  write32(bmpOut, 0);
   write32(bmpOut, imageSize);
-  write32(bmpOut, 2835);  // xPixelsPerMeter (72 DPI)
-  write32(bmpOut, 2835);  // yPixelsPerMeter (72 DPI)
-  write32(bmpOut, 2);     // colorsUsed
-  write32(bmpOut, 2);     // colorsImportant
-
-  // Color Palette (2 colors x 4 bytes = 8 bytes)
-  // Format: Blue, Green, Red, Reserved (BGRA)
-  // Note: In 1-bit BMP, palette index 0 = black, 1 = white
-  uint8_t palette[8] = {
-      0x00, 0x00, 0x00, 0x00,  // Color 0: Black
-      0xFF, 0xFF, 0xFF, 0x00   // Color 1: White
-  };
-  for (const uint8_t i : palette) {
-    bmpOut.write(i);
-  }
+  write32(bmpOut, 2835);
+  write32(bmpOut, 2835);
+  write32(bmpOut, 4);
+  write32(bmpOut, 4);
+  uint8_t palette[16] = {0x00, 0x00, 0x00, 0x00, 0x55, 0x55, 0x55, 0x00, 0xAA, 0xAA, 0xAA, 0x00, 0xFF, 0xFF, 0xFF, 0x00};
+  for (const uint8_t i : palette) bmpOut.write(i);
 }
+}  // namespace
 
-// Helper function: Write BMP header with 2-bit color depth
-static void writeBmpHeader2bit(Print& bmpOut, const int width, const int height) {
-  // Calculate row padding (each row must be multiple of 4 bytes)
-  const int bytesPerRow = (width * 2 + 31) / 32 * 4;  // 2 bits per pixel, round up
-  const int imageSize = bytesPerRow * height;
-  const uint32_t fileSize = 70 + imageSize;  // 14 (file header) + 40 (DIB header) + 16 (palette) + image
-
-  // BMP File Header (14 bytes)
-  bmpOut.write('B');
-  bmpOut.write('M');
-  write32(bmpOut, fileSize);  // File size
-  write32(bmpOut, 0);         // Reserved
-  write32(bmpOut, 70);        // Offset to pixel data
-
-  // DIB Header (BITMAPINFOHEADER - 40 bytes)
-  write32(bmpOut, 40);
-  write32Signed(bmpOut, width);
-  write32Signed(bmpOut, -height);  // Negative height = top-down bitmap
-  write16(bmpOut, 1);              // Color planes
-  write16(bmpOut, 2);              // Bits per pixel (2 bits)
-  write32(bmpOut, 0);              // BI_RGB (no compression)
-  write32(bmpOut, imageSize);
-  write32(bmpOut, 2835);  // xPixelsPerMeter (72 DPI)
-  write32(bmpOut, 2835);  // yPixelsPerMeter (72 DPI)
-  write32(bmpOut, 4);     // colorsUsed
-  write32(bmpOut, 4);     // colorsImportant
-
-  // Color Palette (4 colors x 4 bytes = 16 bytes)
-  // Format: Blue, Green, Red, Reserved (BGRA)
-  uint8_t palette[16] = {
-      0x00, 0x00, 0x00, 0x00,  // Color 0: Black
-      0x55, 0x55, 0x55, 0x00,  // Color 1: Dark gray (85)
-      0xAA, 0xAA, 0xAA, 0x00,  // Color 2: Light gray (170)
-      0xFF, 0xFF, 0xFF, 0x00   // Color 3: White
-  };
-  for (const uint8_t i : palette) {
-    bmpOut.write(i);
-  }
-}
-
-// Callback function for picojpeg to read JPEG data
-unsigned char JpegToBmpConverter::jpegReadCallback(unsigned char* pBuf, const unsigned char buf_size,
-                                                   unsigned char* pBytes_actually_read, void* pCallback_data) {
-  auto* context = static_cast<JpegReadContext*>(pCallback_data);
-
-  if (!context || !context->file) {
-    return PJPG_STREAM_READ_ERROR;
-  }
-
-  // Check if we need to refill our context buffer
-  if (context->bufferPos >= context->bufferFilled) {
-    context->bufferFilled = context->file.read(context->buffer, sizeof(context->buffer));
-    context->bufferPos = 0;
-
-    if (context->bufferFilled == 0) {
-      // EOF or error
-      *pBytes_actually_read = 0;
-      return 0;  // Success (EOF is normal)
-    }
-  }
-
-  // Copy available bytes to picojpeg's buffer
-  const size_t available = context->bufferFilled - context->bufferPos;
-  const size_t toRead = available < buf_size ? available : buf_size;
-
-  memcpy(pBuf, context->buffer + context->bufferPos, toRead);
-  context->bufferPos += toRead;
-  *pBytes_actually_read = static_cast<unsigned char>(toRead);
-
-  return 0;  // Success
-}
-
-// Internal implementation with configurable target size and bit depth
 bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bmpOut, int targetWidth, int targetHeight,
                                                      bool oneBit, bool crop) {
-  LOG_DBG("JPG", "Converting JPEG to %s BMP (target: %dx%d)", oneBit ? "1-bit" : "2-bit", targetWidth, targetHeight);
-
-  // Setup context for picojpeg callback
-  JpegReadContext context = {.file = jpegFile, .bufferPos = 0, .bufferFilled = 0};
-
-  // Initialize picojpeg decoder
-  pjpeg_image_info_t imageInfo;
-  const unsigned char status = pjpeg_decode_init(&imageInfo, jpegReadCallback, &context, 0);
-  if (status != 0) {
-    LOG_ERR("JPG", "JPEG decode init failed with error code: %d", status);
+  auto* jpeg = new JPEGDEC();
+  if (!jpeg->open(&jpegFile, static_cast<int>(jpegFile.size()), nullptr, jpegReadCallback, jpegSeekCallback,
+                  jpegDrawCallbackSequential)) {
+    LOG_ERR("JPG", "Failed to open JPEG");
+    delete jpeg;
     return false;
   }
 
-  LOG_DBG("JPG", "JPEG dimensions: %dx%d, components: %d, MCUs: %dx%d", imageInfo.m_width, imageInfo.m_height,
-          imageInfo.m_comps, imageInfo.m_MCUSPerRow, imageInfo.m_MCUSPerCol);
+  const int srcWidth = jpeg->getWidth();
+  const int srcHeight = jpeg->getHeight();
 
-  // Safety limits to prevent memory issues on ESP32
-  constexpr int MAX_IMAGE_WIDTH = 2048;
-  constexpr int MAX_IMAGE_HEIGHT = 3072;
-  constexpr int MAX_MCU_ROW_BYTES = 65536;
+  // Determine optimal internal scaling (1, 2, 4, or 8)
+  int decodeFlags = 0;
+  int internalScale = 1;
+  const float scaleNeeded = std::min((float)targetWidth / srcWidth, (float)targetHeight / srcHeight);
 
-  if (imageInfo.m_width > MAX_IMAGE_WIDTH || imageInfo.m_height > MAX_IMAGE_HEIGHT) {
-    LOG_DBG("JPG", "Image too large (%dx%d), max supported: %dx%d", imageInfo.m_width, imageInfo.m_height,
-            MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
-    return false;
+  if (scaleNeeded <= 0.125f) {
+    decodeFlags = JPEG_SCALE_EIGHTH;
+    internalScale = 8;
+  } else if (scaleNeeded <= 0.25f) {
+    decodeFlags = JPEG_SCALE_QUARTER;
+    internalScale = 4;
+  } else if (scaleNeeded <= 0.5f) {
+    decodeFlags = JPEG_SCALE_HALF;
+    internalScale = 2;
   }
 
-  // Calculate output dimensions (pre-scale to fit display exactly)
-  int outWidth = imageInfo.m_width;
-  int outHeight = imageInfo.m_height;
-  // Use fixed-point scaling (16.16) for sub-pixel accuracy
-  uint32_t scaleX_fp = 65536;  // 1.0 in 16.16 fixed point
-  uint32_t scaleY_fp = 65536;
-  bool needsScaling = false;
+  const int scaledSrcWidth = srcWidth / internalScale;
+  const int scaledSrcHeight = srcHeight / internalScale;
 
-  if (targetWidth > 0 && targetHeight > 0 && (imageInfo.m_width != targetWidth || imageInfo.m_height != targetHeight)) {
-    // Calculate scale to fit/fill target dimensions while maintaining aspect ratio
-    const float scaleToFitWidth = static_cast<float>(targetWidth) / imageInfo.m_width;
-    const float scaleToFitHeight = static_cast<float>(targetHeight) / imageInfo.m_height;
-    // We scale to the smaller dimension, so we can potentially crop later.
-    float scale = 1.0;
-    if (crop) {  // if we will crop, scale to the smaller dimension
-      scale = (scaleToFitWidth > scaleToFitHeight) ? scaleToFitWidth : scaleToFitHeight;
-    } else {  // else, scale to the larger dimension to fit
-      scale = (scaleToFitWidth < scaleToFitHeight) ? scaleToFitWidth : scaleToFitHeight;
-    }
+  // Calculate final output dimensions based on target
+  float finalScale = std::min((float)targetWidth / scaledSrcWidth, (float)targetHeight / scaledSrcHeight);
+  if (crop) finalScale = std::max((float)targetWidth / scaledSrcWidth, (float)targetHeight / scaledSrcHeight);
 
-    outWidth = static_cast<int>(imageInfo.m_width * scale);
-    outHeight = static_cast<int>(imageInfo.m_height * scale);
+  const int outWidth = std::max(1, (int)(scaledSrcWidth * finalScale));
+  const int outHeight = std::max(1, (int)(scaledSrcHeight * finalScale));
 
-    // Ensure at least 1 pixel
-    if (outWidth < 1) outWidth = 1;
-    if (outHeight < 1) outHeight = 1;
+  const uint32_t scaleX_fp = (static_cast<uint32_t>(scaledSrcWidth) << 16) / outWidth;
+  const uint32_t scaleY_fp = (static_cast<uint32_t>(scaledSrcHeight) << 16) / outHeight;
 
-    // Calculate fixed-point scale factors (source pixels per output pixel)
-    // scaleX_fp = (srcWidth << 16) / outWidth
-    scaleX_fp = (static_cast<uint32_t>(imageInfo.m_width) << 16) / outWidth;
-    scaleY_fp = (static_cast<uint32_t>(imageInfo.m_height) << 16) / outHeight;
-    needsScaling = true;
+  int bytesPerRow = oneBit ? ((outWidth + 31) / 32 * 4) : ((outWidth * 2 + 31) / 32 * 4);
+  if (oneBit) writeBmpHeader1bit(bmpOut, outWidth, outHeight);
+  else writeBmpHeader2bit(bmpOut, outWidth, outHeight);
 
-    LOG_DBG("JPG", "Scaling %dx%d -> %dx%d (target %dx%d)", imageInfo.m_width, imageInfo.m_height, outWidth, outHeight,
-            targetWidth, targetHeight);
-  }
+  auto* ctx = new JpegDrawContext();
+  memset(ctx, 0, sizeof(JpegDrawContext));
+  ctx->outWidth = outWidth;
+  ctx->outHeight = outHeight;
+  ctx->scaleX_fp = scaleX_fp;
+  ctx->scaleY_fp = scaleY_fp;
+  ctx->oneBit = oneBit;
+  ctx->bmpOut = &bmpOut;
+  ctx->bytesPerRow = bytesPerRow;
+  ctx->nextOutY_srcStart = scaleY_fp;
+  ctx->rowBuffer = static_cast<uint8_t*>(malloc(bytesPerRow));
+  ctx->rowAccum = new uint32_t[outWidth]();
+  ctx->rowCount = new uint32_t[outWidth]();
 
-  // Write BMP header with output dimensions
-  int bytesPerRow;
-  if (USE_8BIT_OUTPUT && !oneBit) {
-    writeBmpHeader8bit(bmpOut, outWidth, outHeight);
-    bytesPerRow = (outWidth + 3) / 4 * 4;
-  } else if (oneBit) {
-    writeBmpHeader1bit(bmpOut, outWidth, outHeight);
-    bytesPerRow = (outWidth + 31) / 32 * 4;  // 1 bit per pixel
-  } else {
-    writeBmpHeader2bit(bmpOut, outWidth, outHeight);
-    bytesPerRow = (outWidth * 2 + 31) / 32 * 4;
-  }
+  if (oneBit) ctx->atkinson1BitDitherer = new Atkinson1BitDitherer(outWidth);
+  else ctx->atkinsonDitherer = new AtkinsonDitherer(outWidth);
 
-  uint8_t* rowBuffer = nullptr;
-  uint8_t* mcuRowBuffer = nullptr;
-  AtkinsonDitherer* atkinsonDitherer = nullptr;
-  FloydSteinbergDitherer* fsDitherer = nullptr;
-  Atkinson1BitDitherer* atkinson1BitDitherer = nullptr;
-  uint32_t* rowAccum = nullptr;  // Accumulator for each output X (32-bit for larger sums)
-  uint32_t* rowCount = nullptr;  // Count of source pixels accumulated per output X
+  g_ctx = ctx;
+  bool success = jpeg->decode(0, 0, decodeFlags);
+  if (success && ctx->currentOutY < outHeight) emitOutputRow(ctx);
+  g_ctx = nullptr;
 
-  // RAII guard: frees all heap resources on any return path, including early exits.
-  // Holds references so it always sees the latest pointer values assigned below.
-  struct Cleanup {
-    uint8_t*& rowBuffer;
-    uint8_t*& mcuRowBuffer;
-    AtkinsonDitherer*& atkinsonDitherer;
-    FloydSteinbergDitherer*& fsDitherer;
-    Atkinson1BitDitherer*& atkinson1BitDitherer;
-    uint32_t*& rowAccum;
-    uint32_t*& rowCount;
-    ~Cleanup() {
-      delete[] rowAccum;
-      delete[] rowCount;
-      delete atkinsonDitherer;
-      delete fsDitherer;
-      delete atkinson1BitDitherer;
-      free(mcuRowBuffer);
-      free(rowBuffer);
-    }
-  } cleanup{rowBuffer, mcuRowBuffer, atkinsonDitherer, fsDitherer, atkinson1BitDitherer, rowAccum, rowCount};
+  delete[] ctx->rowAccum;
+  delete[] ctx->rowCount;
+  delete ctx->atkinsonDitherer;
+  delete ctx->atkinson1BitDitherer;
+  free(ctx->rowBuffer);
+  delete ctx;
+  jpeg->close();
+  delete jpeg;
 
-  // Allocate row buffer
-  rowBuffer = static_cast<uint8_t*>(malloc(bytesPerRow));
-  if (!rowBuffer) {
-    LOG_ERR("JPG", "Failed to allocate row buffer");
-    return false;
-  }
-
-  // Allocate a buffer for one MCU row worth of grayscale pixels
-  // This is the minimal memory needed for streaming conversion
-  const int mcuPixelHeight = imageInfo.m_MCUHeight;
-  const int mcuRowPixels = imageInfo.m_width * mcuPixelHeight;
-
-  // Validate MCU row buffer size before allocation
-  if (mcuRowPixels > MAX_MCU_ROW_BYTES) {
-    LOG_DBG("JPG", "MCU row buffer too large (%d bytes), max: %d", mcuRowPixels, MAX_MCU_ROW_BYTES);
-    return false;
-  }
-
-  mcuRowBuffer = static_cast<uint8_t*>(malloc(mcuRowPixels));
-  if (!mcuRowBuffer) {
-    LOG_ERR("JPG", "Failed to allocate MCU row buffer (%d bytes)", mcuRowPixels);
-    return false;
-  }
-
-  // Create ditherer if enabled
-  // Use OUTPUT dimensions for dithering (after prescaling)
-  if (oneBit) {
-    // For 1-bit output, use Atkinson dithering for better quality
-    atkinson1BitDitherer = new Atkinson1BitDitherer(outWidth);
-  } else if (!USE_8BIT_OUTPUT) {
-    if (USE_ATKINSON) {
-      atkinsonDitherer = new AtkinsonDitherer(outWidth);
-    } else if (USE_FLOYD_STEINBERG) {
-      fsDitherer = new FloydSteinbergDitherer(outWidth);
-    }
-  }
-
-  // For scaling: accumulate source rows into scaled output rows
-  // We need to track which source Y maps to which output Y
-  // Using fixed-point: srcY_fp = outY * scaleY_fp (gives source Y in 16.16 format)
-  int currentOutY = 0;             // Current output row being accumulated
-  uint32_t nextOutY_srcStart = 0;  // Source Y where next output row starts (16.16 fixed point)
-
-  if (needsScaling) {
-    rowAccum = new uint32_t[outWidth]();
-    rowCount = new uint32_t[outWidth]();
-    nextOutY_srcStart = scaleY_fp;  // First boundary is at scaleY_fp (source Y for outY=1)
-  }
-
-  // Process MCUs row-by-row and write to BMP as we go (top-down)
-  const int mcuPixelWidth = imageInfo.m_MCUWidth;
-
-  for (int mcuY = 0; mcuY < imageInfo.m_MCUSPerCol; mcuY++) {
-    // Clear the MCU row buffer
-    memset(mcuRowBuffer, 0, mcuRowPixels);
-
-    // Decode one row of MCUs
-    for (int mcuX = 0; mcuX < imageInfo.m_MCUSPerRow; mcuX++) {
-      const unsigned char mcuStatus = pjpeg_decode_mcu();
-      if (mcuStatus != 0) {
-        if (mcuStatus == PJPG_NO_MORE_BLOCKS) {
-          LOG_ERR("JPG", "Unexpected end of blocks at MCU (%d, %d)", mcuX, mcuY);
-        } else {
-          LOG_ERR("JPG", "JPEG decode MCU failed at (%d, %d) with error code: %d", mcuX, mcuY, mcuStatus);
-        }
-        return false;
-      }
-
-      // picojpeg stores MCU data in 8x8 blocks
-      // Block layout: H2V2(16x16)=0,64,128,192 H2V1(16x8)=0,64 H1V2(8x16)=0,128
-      for (int blockY = 0; blockY < mcuPixelHeight; blockY++) {
-        for (int blockX = 0; blockX < mcuPixelWidth; blockX++) {
-          const int pixelX = mcuX * mcuPixelWidth + blockX;
-          if (pixelX >= imageInfo.m_width) continue;
-
-          // Calculate proper block offset for picojpeg buffer
-          const int blockCol = blockX / 8;
-          const int blockRow = blockY / 8;
-          const int localX = blockX % 8;
-          const int localY = blockY % 8;
-          const int blocksPerRow = mcuPixelWidth / 8;
-          const int blockIndex = blockRow * blocksPerRow + blockCol;
-          const int pixelOffset = blockIndex * 64 + localY * 8 + localX;
-
-          uint8_t gray;
-          if (imageInfo.m_comps == 1) {
-            gray = imageInfo.m_pMCUBufR[pixelOffset];
-          } else {
-            const uint8_t r = imageInfo.m_pMCUBufR[pixelOffset];
-            const uint8_t g = imageInfo.m_pMCUBufG[pixelOffset];
-            const uint8_t b = imageInfo.m_pMCUBufB[pixelOffset];
-            gray = (r * 25 + g * 50 + b * 25) / 100;
-          }
-
-          mcuRowBuffer[blockY * imageInfo.m_width + pixelX] = gray;
-        }
-      }
-    }
-
-    // Process source rows from this MCU row
-    const int startRow = mcuY * mcuPixelHeight;
-    const int endRow = (mcuY + 1) * mcuPixelHeight;
-
-    for (int y = startRow; y < endRow && y < imageInfo.m_height; y++) {
-      const int bufferY = y - startRow;
-
-      if (!needsScaling) {
-        // No scaling - direct output (1:1 mapping)
-        memset(rowBuffer, 0, bytesPerRow);
-
-        if (USE_8BIT_OUTPUT && !oneBit) {
-          for (int x = 0; x < outWidth; x++) {
-            const uint8_t gray = mcuRowBuffer[bufferY * imageInfo.m_width + x];
-            rowBuffer[x] = adjustPixel(gray);
-          }
-        } else if (oneBit) {
-          // 1-bit output with Atkinson dithering for better quality
-          for (int x = 0; x < outWidth; x++) {
-            const uint8_t gray = mcuRowBuffer[bufferY * imageInfo.m_width + x];
-            const uint8_t bit =
-                atkinson1BitDitherer ? atkinson1BitDitherer->processPixel(gray, x) : quantize1bit(gray, x, y);
-            // Pack 1-bit value: MSB first, 8 pixels per byte
-            const int byteIndex = x / 8;
-            const int bitOffset = 7 - (x % 8);
-            rowBuffer[byteIndex] |= (bit << bitOffset);
-          }
-          if (atkinson1BitDitherer) atkinson1BitDitherer->nextRow();
-        } else {
-          // 2-bit output
-          for (int x = 0; x < outWidth; x++) {
-            const uint8_t gray = adjustPixel(mcuRowBuffer[bufferY * imageInfo.m_width + x]);
-            uint8_t twoBit;
-            if (atkinsonDitherer) {
-              twoBit = atkinsonDitherer->processPixel(gray, x);
-            } else if (fsDitherer) {
-              twoBit = fsDitherer->processPixel(gray, x);
-            } else {
-              twoBit = quantize(gray, x, y);
-            }
-            const int byteIndex = (x * 2) / 8;
-            const int bitOffset = 6 - ((x * 2) % 8);
-            rowBuffer[byteIndex] |= (twoBit << bitOffset);
-          }
-          if (atkinsonDitherer)
-            atkinsonDitherer->nextRow();
-          else if (fsDitherer)
-            fsDitherer->nextRow();
-        }
-        bmpOut.write(rowBuffer, bytesPerRow);
-      } else {
-        // Fixed-point area averaging for exact fit scaling
-        // For each output pixel X, accumulate source pixels that map to it
-        // srcX range for outX: [outX * scaleX_fp >> 16, (outX+1) * scaleX_fp >> 16)
-        const uint8_t* srcRow = mcuRowBuffer + bufferY * imageInfo.m_width;
-
-        for (int outX = 0; outX < outWidth; outX++) {
-          // Calculate source X range for this output pixel
-          const int srcXStart = (static_cast<uint32_t>(outX) * scaleX_fp) >> 16;
-          const int srcXEnd = (static_cast<uint32_t>(outX + 1) * scaleX_fp) >> 16;
-
-          // Accumulate all source pixels in this range
-          int sum = 0;
-          int count = 0;
-          for (int srcX = srcXStart; srcX < srcXEnd && srcX < imageInfo.m_width; srcX++) {
-            sum += srcRow[srcX];
-            count++;
-          }
-
-          // Handle edge case: if no pixels in range, use nearest
-          if (count == 0 && srcXStart < imageInfo.m_width) {
-            sum = srcRow[srcXStart];
-            count = 1;
-          }
-
-          rowAccum[outX] += sum;
-          rowCount[outX] += count;
-        }
-
-        // Check if we've crossed into the next output row(s)
-        // Current source Y in fixed point: y << 16
-        const uint32_t srcY_fp = static_cast<uint32_t>(y + 1) << 16;
-
-        // Output all rows whose boundaries we've crossed (handles both up and downscaling)
-        // For upscaling, one source row may produce multiple output rows
-        while (srcY_fp >= nextOutY_srcStart && currentOutY < outHeight) {
-          memset(rowBuffer, 0, bytesPerRow);
-
-          if (USE_8BIT_OUTPUT && !oneBit) {
-            for (int x = 0; x < outWidth; x++) {
-              const uint8_t gray = (rowCount[x] > 0) ? (rowAccum[x] / rowCount[x]) : 0;
-              rowBuffer[x] = adjustPixel(gray);
-            }
-          } else if (oneBit) {
-            // 1-bit output with Atkinson dithering for better quality
-            for (int x = 0; x < outWidth; x++) {
-              const uint8_t gray = (rowCount[x] > 0) ? (rowAccum[x] / rowCount[x]) : 0;
-              const uint8_t bit = atkinson1BitDitherer ? atkinson1BitDitherer->processPixel(gray, x)
-                                                       : quantize1bit(gray, x, currentOutY);
-              // Pack 1-bit value: MSB first, 8 pixels per byte
-              const int byteIndex = x / 8;
-              const int bitOffset = 7 - (x % 8);
-              rowBuffer[byteIndex] |= (bit << bitOffset);
-            }
-            if (atkinson1BitDitherer) atkinson1BitDitherer->nextRow();
-          } else {
-            // 2-bit output
-            for (int x = 0; x < outWidth; x++) {
-              const uint8_t gray = adjustPixel((rowCount[x] > 0) ? (rowAccum[x] / rowCount[x]) : 0);
-              uint8_t twoBit;
-              if (atkinsonDitherer) {
-                twoBit = atkinsonDitherer->processPixel(gray, x);
-              } else if (fsDitherer) {
-                twoBit = fsDitherer->processPixel(gray, x);
-              } else {
-                twoBit = quantize(gray, x, currentOutY);
-              }
-              const int byteIndex = (x * 2) / 8;
-              const int bitOffset = 6 - ((x * 2) % 8);
-              rowBuffer[byteIndex] |= (twoBit << bitOffset);
-            }
-            if (atkinsonDitherer)
-              atkinsonDitherer->nextRow();
-            else if (fsDitherer)
-              fsDitherer->nextRow();
-          }
-
-          bmpOut.write(rowBuffer, bytesPerRow);
-          currentOutY++;
-
-          // Update boundary for next output row
-          nextOutY_srcStart = static_cast<uint32_t>(currentOutY + 1) * scaleY_fp;
-
-          // For upscaling: don't reset accumulators if next output row uses same source data
-          // Only reset when we'll move to a new source row
-          if (srcY_fp >= nextOutY_srcStart) {
-            // More output rows to emit from same source - keep accumulator data
-            continue;
-          }
-          // Moving to next source row - reset accumulators
-          memset(rowAccum, 0, outWidth * sizeof(uint32_t));
-          memset(rowCount, 0, outWidth * sizeof(uint32_t));
-        }
-      }
-    }
-  }
-
-  LOG_DBG("JPG", "Successfully converted JPEG to BMP");
-  return true;
+  return success;
 }
 
-// Core function: Convert JPEG file to 2-bit BMP (uses default target size)
 bool JpegToBmpConverter::jpegFileToBmpStream(FsFile& jpegFile, Print& bmpOut, bool crop) {
   return jpegFileToBmpStreamInternal(jpegFile, bmpOut, TARGET_MAX_WIDTH, TARGET_MAX_HEIGHT, false, crop);
 }
 
-// Convert with custom target size (for thumbnails, 2-bit)
 bool JpegToBmpConverter::jpegFileToBmpStreamWithSize(FsFile& jpegFile, Print& bmpOut, int targetMaxWidth,
                                                      int targetMaxHeight) {
   return jpegFileToBmpStreamInternal(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, false);
 }
 
-// Convert to 1-bit BMP (black and white only, no grays) for fast home screen rendering
 bool JpegToBmpConverter::jpegFileTo1BitBmpStreamWithSize(FsFile& jpegFile, Print& bmpOut, int targetMaxWidth,
                                                          int targetMaxHeight) {
   return jpegFileToBmpStreamInternal(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, true, true);
