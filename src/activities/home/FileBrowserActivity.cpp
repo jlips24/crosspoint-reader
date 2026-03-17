@@ -254,16 +254,11 @@ void FileBrowserActivity::render(RenderLock&&) {
   std::string folderName = (basepath == "/") ? tr(STR_SD_CARD) : basepath.substr(basepath.rfind('/') + 1);
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, folderName.c_str());
 
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
-  if (files.empty()) {
-    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, contentTop + 20, tr(STR_NO_FILES_FOUND));
-  } else {
-    GUI.drawList(
-        renderer, Rect{0, contentTop, pageWidth, contentHeight}, files.size(), selectorIndex,
-        [this](int index) { return getFileName(files[index]); }, nullptr,
-        [this](int index) { return UITheme::getFileIcon(files[index]); });
-  }
+  if (SETTINGS.fileBrowserViewMode == CrossPointSettings::VIEW_LIST) {
+    renderList(metrics, pageWidth, pageHeight);
+  } //else {
+    //renderCovers(metrics, pageWidth, pageHeight);
+  //}
 
   // Help text
   const auto labels =
@@ -272,6 +267,20 @@ void FileBrowserActivity::render(RenderLock&&) {
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer();
+}
+
+void FileBrowserActivity::renderList(const ThemeMetrics& metrics, int pageWidth, int pageHeight) {
+  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
+
+  if (true) {//(files.empty()) {
+    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, contentTop + 20, tr(STR_NO_FILES_FOUND));
+  } else {
+    GUI.drawList(
+      renderer, Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(files.size()),
+      static_cast<int>(selectorIndex), [this](int index) { return getFileName(files[index]); }, nullptr,
+      [this](int index) { return UITheme::getFileIcon(files[index]); });
+  }
 }
 
 size_t FileBrowserActivity::findEntry(const std::string& name) const {

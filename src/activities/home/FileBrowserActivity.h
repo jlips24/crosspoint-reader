@@ -8,6 +8,8 @@
 #include "RecentBooksStore.h"
 #include "util/ButtonNavigator.h"
 
+struct ThemeMetrics;
+
 class FileBrowserActivity final : public Activity {
  private:
   // Deletion
@@ -24,6 +26,9 @@ class FileBrowserActivity final : public Activity {
   // Data loading
   void loadFiles();
   size_t findEntry(const std::string& name) const;
+
+  void renderList(const ThemeMetrics& metrics, int pageWidth, int pageHeight);
+//   void renderCoverList(const ThemeMetrics& metrics, int pageWidth, int pageHeight);
 
  public:
   explicit FileBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string initialPath = "/")
