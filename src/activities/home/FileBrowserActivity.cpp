@@ -8,6 +8,7 @@
 #include <Xtc.h>
 
 #include <algorithm>
+#include <cassert>
 
 #include "../util/ConfirmationActivity.h"
 #include "MappedInputManager.h"
@@ -226,6 +227,7 @@ void FileBrowserActivity::loop() {
   const int pageItems = (SETTINGS.fileBrowserViewMode == CrossPointSettings::VIEW_LIST)
                             ? UITheme::getInstance().getNumberOfItemsPerPage(renderer, true, false, true, false)
                             : metrics.coverListItemsPerPage;
+  assert(pageItems > 0);
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     if (files.empty()) return;
@@ -372,6 +374,7 @@ void FileBrowserActivity::renderCoverList(const ThemeMetrics& metrics, int pageW
     renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, contentTop + 20, tr(STR_NO_FILES_FOUND));
   } else {
     // Lazy-load metadata for the current visible page
+    assert(metrics.coverListItemsPerPage > 0);
     const int itemsPerPage = metrics.coverListItemsPerPage;
     const int startIndex = (static_cast<int>(selectorIndex) / itemsPerPage) * itemsPerPage;
     const int endIndex = std::min(startIndex + itemsPerPage, static_cast<int>(files.size()));
