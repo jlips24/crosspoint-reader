@@ -35,7 +35,11 @@ class FileBrowserActivity final : public Activity {
   std::map<int, FileMetadata> metadataCache;
   std::list<int> lruList;
 
-  void getMetadata(int index, std::string& outTitle, std::string& outAuthor);
+  // Memoization for rendering
+  mutable int lastMetadataIndex = -1;
+  mutable FileMetadata lastMetadata;
+
+  void getMetadata(int index, std::string& outTitle, std::string& outAuthor, bool updateLRU = true);
   void loadMetadata(int index);
 
   // Data loading

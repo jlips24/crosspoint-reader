@@ -83,6 +83,7 @@ void FileBrowserActivity::loadFiles() {
   files.clear();
   metadataCache.clear();
   lruList.clear();
+  lastMetadataIndex = -1;
 
   auto root = Storage.open(basepath.c_str());
   if (!root || !root.isDirectory()) {
@@ -116,20 +117,33 @@ void FileBrowserActivity::loadFiles() {
   sortFileList(files);
 }
 
-void FileBrowserActivity::getMetadata(int index, std::string& outTitle, std::string& outAuthor) {
+void FileBrowserActivity::getMetadata(int index, std::string& outTitle, std::string& outAuthor, bool updateLRU) {
   if (index < 0 || index >= static_cast<int>(files.size())) {
     outTitle = "";
     outAuthor = "";
     return;
   }
 
+  // Memoization hit
+  if (index == lastMetadataIndex) {
+    outTitle = lastMetadata.title;
+    outAuthor = lastMetadata.author;
+    return;
+  }
+
   auto it = metadataCache.find(index);
   if (it != metadataCache.end()) {
-    // Cache Hit: Update LRU position
-    lruList.remove(index);
-    lruList.push_front(index);
+    // Cache Hit: Update LRU position if requested
+    if (updateLRU) {
+      lruList.remove(index);
+      lruList.push_front(index);
+    }
     outTitle = it->second.title;
     outAuthor = it->second.author;
+
+    // Update memoization
+    lastMetadataIndex = index;
+    lastMetadata = it->second;
     return;
   }
 
@@ -200,6 +214,7 @@ void FileBrowserActivity::onExit() {
   files.clear();
   metadataCache.clear();
   lruList.clear();
+  lastMetadataIndex = -1;
 }
 
 void FileBrowserActivity::clearFileMetadata(const std::string& fullPath) {
@@ -374,8 +389,8 @@ void FileBrowserActivity::renderCoverList(const ThemeMetrics& metrics, int pageW
     renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, contentTop + 20, tr(STR_NO_FILES_FOUND));
   } else {
     // Lazy-load metadata for the current visible page
-    assert(metrics.coverListItemsPerPage > 0);
     const int itemsPerPage = metrics.coverListItemsPerPage;
+    assert(itemsPerPage > 0);
     const int startIndex = (static_cast<int>(selectorIndex) / itemsPerPage) * itemsPerPage;
     const int endIndex = std::min(startIndex + itemsPerPage, static_cast<int>(files.size()));
 
@@ -408,22 +423,21 @@ void FileBrowserActivity::renderCoverList(const ThemeMetrics& metrics, int pageW
 
     if (showingLoading) {
       renderer.clearScreen();
+      GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
+                     ((basepath == "/") ? tr(STR_SD_CARD) : basepath.substr(basepath.rfind('/') + 1)).c_str());
     }
-
-    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
-                   ((basepath == "/") ? tr(STR_SD_CARD) : basepath.substr(basepath.rfind('/') + 1)).c_str());
 
     GUI.drawCoverList(
         renderer, Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(files.size()),
         static_cast<int>(selectorIndex),
         [this](int index) {
           std::string t, a;
-          getMetadata(index, t, a);
+          getMetadata(index, t, a, false);  // false = don't update LRU
           return t;
         },
         [this](int index) {
           std::string t, a;
-          getMetadata(index, t, a);
+          getMetadata(index, t, a, false);  // false = don't update LRU
           return a;
         },
         [this](int index) {
