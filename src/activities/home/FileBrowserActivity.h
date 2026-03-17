@@ -40,7 +40,7 @@ class FileBrowserActivity final : public Activity {
   mutable FileMetadata lastMetadata;
 
   void getMetadata(int index, std::string& outTitle, std::string& outAuthor, bool updateLRU = true);
-  void loadMetadata(int index);
+  void loadMetadata(int index, int maxWidth, int maxHeight);
 
   // Data loading
   void loadFiles();

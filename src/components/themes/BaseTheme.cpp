@@ -661,10 +661,7 @@ void BaseTheme::drawCoverList(const GfxRenderer& renderer, Rect rect, int itemCo
 void BaseTheme::drawCoverThumbnail(const GfxRenderer& renderer, int x, int y, int maxWidth, int maxHeight,
                                    const std::string& path, bool selected) const {
   if (FsHelpers::hasEpubExtension(path) || FsHelpers::hasXtcExtension(path)) {
-    const std::string cachePath = FsHelpers::getCachePath(path);
-    const std::string thumbPaths[] = {
-        cachePath + "/thumb_" + std::to_string(maxWidth) + "x" + std::to_string(maxHeight) + ".bmp",
-        cachePath + "/thumb_226.bmp", cachePath + "/thumb_400.bmp"};
+    const std::vector<std::string> thumbPaths = UITheme::getThumbnailCandidates(path, maxWidth, maxHeight);
 
     for (const auto& thumbPath : thumbPaths) {
       FsFile file;

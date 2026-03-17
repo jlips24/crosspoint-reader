@@ -152,7 +152,7 @@ void FileBrowserActivity::getMetadata(int index, std::string& outTitle, std::str
   outAuthor = "";
 }
 
-void FileBrowserActivity::loadMetadata(int index) {
+void FileBrowserActivity::loadMetadata(int index, int maxWidth, int maxHeight) {
   if (index < 0 || index >= static_cast<int>(files.size())) return;
   const std::string& filename = files[index];
 
@@ -180,7 +180,7 @@ void FileBrowserActivity::loadMetadata(int index) {
       meta.author = epub.getAuthor();
       // Only generate if we're actually in cover mode to save I/O
       if (SETTINGS.fileBrowserViewMode == CrossPointSettings::VIEW_COVERS) {
-        epub.generateThumbBmp(213);
+        epub.generateThumbBmp(maxHeight);
       }
     }
   } else if (FsHelpers::hasXtcExtension(filename)) {
@@ -189,7 +189,7 @@ void FileBrowserActivity::loadMetadata(int index) {
       meta.title = xtc.getTitle();
       meta.author = xtc.getAuthor();
       if (SETTINGS.fileBrowserViewMode == CrossPointSettings::VIEW_COVERS) {
-        xtc.generateThumbBmp(213);
+        xtc.generateThumbBmp(maxHeight);
       }
     }
   }
@@ -394,6 +394,12 @@ void FileBrowserActivity::renderCoverList(const ThemeMetrics& metrics, int pageW
     const int startIndex = (static_cast<int>(selectorIndex) / itemsPerPage) * itemsPerPage;
     const int endIndex = std::min(startIndex + itemsPerPage, static_cast<int>(files.size()));
 
+    // Calculate dimensions for probe (same as theme)
+    const int itemHeight = (contentHeight - (itemsPerPage - 1) * metrics.coverListSpacing) / itemsPerPage;
+    const int coverPadding = 6;
+    const int maxHeight = itemHeight - (coverPadding * 2);
+    const int maxWidth = static_cast<int>(maxHeight * 0.75);
+
     bool showingLoading = false;
     Rect popupRect;
 
@@ -405,10 +411,17 @@ void FileBrowserActivity::renderCoverList(const ThemeMetrics& metrics, int pageW
           if (cleanBasePath.back() != '/') cleanBasePath += "/";
           const std::string fullPath = cleanBasePath + filename;
 
-          const std::string cachePath = FsHelpers::getCachePath(fullPath);
-          const std::string thumbPath = cachePath + "/thumb_213.bmp";
+          const std::vector<std::string> thumbPaths = UITheme::getThumbnailCandidates(fullPath, maxWidth, maxHeight);
 
-          if (!Storage.exists(thumbPath.c_str())) {
+          bool thumbExists = false;
+          for (const auto& thumbPath : thumbPaths) {
+            if (Storage.exists(thumbPath.c_str())) {
+              thumbExists = true;
+              break;
+            }
+          }
+
+          if (!thumbExists) {
             if (!showingLoading) {
               showingLoading = true;
               popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
@@ -417,7 +430,7 @@ void FileBrowserActivity::renderCoverList(const ThemeMetrics& metrics, int pageW
             GUI.fillPopupProgress(renderer, popupRect, progress);
           }
         }
-        loadMetadata(i);
+        loadMetadata(i, maxWidth, maxHeight);
       }
     }
 
