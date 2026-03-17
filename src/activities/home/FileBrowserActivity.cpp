@@ -16,6 +16,14 @@
 
 namespace {
 constexpr unsigned long GO_HOME_MS = 1000;
+
+std::string getFileName(std::string filename) {
+  if (filename.back() == '/') {
+    return filename.substr(0, filename.length() - 1);
+  }
+  const auto pos = filename.rfind('.');
+  return filename.substr(0, pos);
+}
 }  // namespace
 
 void sortFileList(std::vector<std::string>& strs) {
@@ -72,6 +80,8 @@ void sortFileList(std::vector<std::string>& strs) {
 
 void FileBrowserActivity::loadFiles() {
   files.clear();
+  metadataCache.clear();
+  lruList.clear();
 
   auto root = Storage.open(basepath.c_str());
   if (!root || !root.isDirectory()) {
@@ -103,43 +113,76 @@ void FileBrowserActivity::loadFiles() {
   }
   root.close();
   sortFileList(files);
+}
 
-  // Pre-load metadata for cover list mode
-  filesMetadata.clear();
-  filesMetadata.resize(files.size());
+void FileBrowserActivity::getMetadata(int index, std::string& outTitle, std::string& outAuthor) {
+  if (index < 0 || index >= static_cast<int>(files.size())) {
+    outTitle = "";
+    outAuthor = "";
+    return;
+  }
 
-  for (size_t i = 0; i < files.size(); i++) {
-    const std::string& filename = files[i];
-    std::string cleanBasePath = basepath;
-    if (cleanBasePath.back() != '/') cleanBasePath += "/";
-    const std::string fullPath = cleanBasePath + filename;
+  auto it = metadataCache.find(index);
+  if (it != metadataCache.end()) {
+    // Cache Hit: Update LRU position
+    lruList.remove(index);
+    lruList.push_front(index);
+    outTitle = it->second.title;
+    outAuthor = it->second.author;
+    return;
+  }
 
-    if (filename.back() == '/') {
-      filesMetadata[i].title = filename.substr(0, filename.length() - 1);
-    } else if (FsHelpers::hasEpubExtension(filename)) {
-      Epub epub(fullPath, "/.crosspoint");
-      if (epub.load(false, true)) {
-        filesMetadata[i].title = epub.getTitle();
-        filesMetadata[i].author = epub.getAuthor();
+  // Cache Miss: Provide fallback and lazy-load if needed (handled in render)
+  outTitle = getFileName(files[index]);
+  outAuthor = "";
+}
 
-        if (SETTINGS.fileBrowserViewMode == CrossPointSettings::VIEW_COVERS) {
-          epub.generateThumbBmp(213);
-        }
-      } else {
-        filesMetadata[i].title = filename.substr(0, filename.find_last_of('.'));
+void FileBrowserActivity::loadMetadata(int index) {
+  if (index < 0 || index >= static_cast<int>(files.size())) return;
+  const std::string& filename = files[index];
+
+  // Folders and non-book files don't need metadata extraction
+  if (filename.back() == '/' || (!FsHelpers::hasEpubExtension(filename) && !FsHelpers::hasXtcExtension(filename))) {
+    return;
+  }
+
+  // Evict if cache is full
+  if (metadataCache.size() >= MAX_CACHE_SIZE) {
+    int oldestIndex = lruList.back();
+    lruList.pop_back();
+    metadataCache.erase(oldestIndex);
+  }
+
+  std::string cleanBasePath = basepath;
+  if (cleanBasePath.back() != '/') cleanBasePath += "/";
+  const std::string fullPath = cleanBasePath + filename;
+
+  FileMetadata meta;
+  if (FsHelpers::hasEpubExtension(filename)) {
+    Epub epub(fullPath, "/.crosspoint");
+    if (epub.load(false, true)) {
+      meta.title = epub.getTitle();
+      meta.author = epub.getAuthor();
+      // Only generate if we're actually in cover mode to save I/O
+      if (SETTINGS.fileBrowserViewMode == CrossPointSettings::VIEW_COVERS) {
+        epub.generateThumbBmp(213);
       }
-    } else if (FsHelpers::hasXtcExtension(filename)) {
-      Xtc xtc(fullPath, "/.crosspoint");
-      if (xtc.load()) {
-        filesMetadata[i].title = xtc.getTitle();
-        filesMetadata[i].author = xtc.getAuthor();
-      } else {
-        filesMetadata[i].title = filename.substr(0, filename.find_last_of('.'));
+    }
+  } else if (FsHelpers::hasXtcExtension(filename)) {
+    Xtc xtc(fullPath, "/.crosspoint");
+    if (xtc.load()) {
+      meta.title = xtc.getTitle();
+      meta.author = xtc.getAuthor();
+      if (SETTINGS.fileBrowserViewMode == CrossPointSettings::VIEW_COVERS) {
+        xtc.generateThumbBmp(213);
       }
-    } else {
-      filesMetadata[i].title = filename.substr(0, filename.find_last_of('.'));
     }
   }
+
+  if (meta.title.empty()) meta.title = getFileName(filename);
+
+  metadataCache[index] = std::move(meta);
+  lruList.push_front(index);
 }
 
 void FileBrowserActivity::onEnter() {
@@ -154,6 +197,8 @@ void FileBrowserActivity::onEnter() {
 void FileBrowserActivity::onExit() {
   Activity::onExit();
   files.clear();
+  metadataCache.clear();
+  lruList.clear();
 }
 
 void FileBrowserActivity::clearFileMetadata(const std::string& fullPath) {
@@ -274,14 +319,6 @@ void FileBrowserActivity::loop() {
   });
 }
 
-std::string getFileName(std::string filename) {
-  if (filename.back() == '/') {
-    return filename.substr(0, filename.length() - 1);
-  }
-  const auto pos = filename.rfind('.');
-  return filename.substr(0, pos);
-}
-
 void FileBrowserActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
@@ -328,13 +365,54 @@ void FileBrowserActivity::renderCoverList(const ThemeMetrics& metrics, int pageW
   if (files.empty()) {
     renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, contentTop + 20, tr(STR_NO_FILES_FOUND));
   } else {
+    // Lazy-load metadata for the current visible page
+    const int itemsPerPage = BaseMetrics::values.coverListItemsPerPage;
+    const int startIndex = (static_cast<int>(selectorIndex) / itemsPerPage) * itemsPerPage;
+    const int endIndex = std::min(startIndex + itemsPerPage, static_cast<int>(files.size()));
+
+    bool showingLoading = false;
+    Rect popupRect;
+
+    for (int i = startIndex; i < endIndex; i++) {
+      if (files[i].back() != '/' && metadataCache.find(i) == metadataCache.end()) {
+        const std::string& filename = files[i];
+        if (FsHelpers::hasEpubExtension(filename) || FsHelpers::hasXtcExtension(filename)) {
+          std::string cleanBasePath = basepath;
+          if (cleanBasePath.back() != '/') cleanBasePath += "/";
+          const std::string fullPath = cleanBasePath + filename;
+
+          const std::string cachePath = FsHelpers::getCachePath(fullPath);
+          const std::string thumbPath = cachePath + "/thumb_213.bmp";
+
+          if (!Storage.exists(thumbPath.c_str())) {
+            if (!showingLoading) {
+              showingLoading = true;
+              popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+            }
+            int progress = (i - startIndex) * 100 / (endIndex - startIndex);
+            GUI.fillPopupProgress(renderer, popupRect, progress);
+          }
+        }
+        loadMetadata(i);
+      }
+    }
+
     GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
                    ((basepath == "/") ? tr(STR_SD_CARD) : basepath.substr(basepath.rfind('/') + 1)).c_str());
 
     GUI.drawCoverList(
         renderer, Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(files.size()),
-        static_cast<int>(selectorIndex), [this](int index) { return filesMetadata[index].title; },
-        [this](int index) { return filesMetadata[index].author; },
+        static_cast<int>(selectorIndex),
+        [this](int index) {
+          std::string t, a;
+          getMetadata(index, t, a);
+          return t;
+        },
+        [this](int index) {
+          std::string t, a;
+          getMetadata(index, t, a);
+          return a;
+        },
         [this](int index) {
           std::string cleanBasePath = basepath;
           if (cleanBasePath.back() != '/') cleanBasePath += "/";

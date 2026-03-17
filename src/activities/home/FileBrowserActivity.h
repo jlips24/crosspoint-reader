@@ -1,6 +1,8 @@
 #pragma once
 
 #include <functional>
+#include <list>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -27,7 +29,14 @@ class FileBrowserActivity final : public Activity {
   // Files state
   std::string basepath = "/";
   std::vector<std::string> files;
-  std::vector<FileMetadata> filesMetadata;
+
+  // LRU Metadata Cache
+  static constexpr size_t MAX_CACHE_SIZE = 9;
+  std::map<int, FileMetadata> metadataCache;
+  std::list<int> lruList;
+
+  void getMetadata(int index, std::string& outTitle, std::string& outAuthor);
+  void loadMetadata(int index);
 
   // Data loading
   void loadFiles();
