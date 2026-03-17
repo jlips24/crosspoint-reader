@@ -428,6 +428,7 @@ void FileBrowserActivity::renderCoverList(const ThemeMetrics& metrics, int pageW
             }
             int progress = (i - startIndex) * 100 / (endIndex - startIndex);
             GUI.fillPopupProgress(renderer, popupRect, progress);
+            renderer.displayBuffer();
           }
         }
         loadMetadata(i, maxWidth, maxHeight);
