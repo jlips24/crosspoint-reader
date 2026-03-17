@@ -35,7 +35,9 @@ constexpr ThemeMetrics values = {.batteryWidth = 16,
                                  .keyboardKeyHeight = 50,
                                  .keyboardKeySpacing = 0,
                                  .keyboardBottomAligned = true,
-                                 .keyboardCenteredText = true};
+                                 .keyboardCenteredText = true,
+                                 .coverListItemsPerPage = 3,
+                                 .coverListSpacing = 8}; // TODO: Maybe 4?
 }
 
 class LyraTheme : public BaseTheme {
@@ -60,6 +62,10 @@ class LyraTheme : public BaseTheme {
   void drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                       const std::function<std::string(int index)>& buttonLabel,
                       const std::function<UIIcon(int index)>& rowIcon) const override;
+  void drawCoverList(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
+                     const std::function<std::string(int index)>& rowTitle,
+                     const std::function<std::string(int index)>& rowAuthor,
+                     const std::function<std::string(int index)>& rowPath) const override;
   void drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std::vector<RecentBook>& recentBooks,
                            const int selectorIndex, bool& coverRendered, bool& coverBufferStored, bool& bufferRestored,
                            std::function<bool()> storeCoverBuffer) const override;

@@ -219,7 +219,10 @@ void FileBrowserActivity::loop() {
     return;
   }
 
-  const int pageItems = UITheme::getInstance().getNumberOfItemsPerPage(renderer, true, false, true, false);
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int pageItems = (SETTINGS.fileBrowserViewMode == CrossPointSettings::VIEW_LIST)
+                            ? UITheme::getInstance().getNumberOfItemsPerPage(renderer, true, false, true, false)
+                            : metrics.coverListItemsPerPage;
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     if (files.empty()) return;
@@ -366,7 +369,7 @@ void FileBrowserActivity::renderCoverList(const ThemeMetrics& metrics, int pageW
     renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, contentTop + 20, tr(STR_NO_FILES_FOUND));
   } else {
     // Lazy-load metadata for the current visible page
-    const int itemsPerPage = BaseMetrics::values.coverListItemsPerPage;
+    const int itemsPerPage = metrics.coverListItemsPerPage;
     const int startIndex = (static_cast<int>(selectorIndex) / itemsPerPage) * itemsPerPage;
     const int endIndex = std::min(startIndex + itemsPerPage, static_cast<int>(files.size()));
 

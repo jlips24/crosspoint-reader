@@ -37,7 +37,9 @@ constexpr ThemeMetrics values = {.batteryWidth = 16,
                                  .keyboardKeyHeight = 50,
                                  .keyboardKeySpacing = 0,
                                  .keyboardBottomAligned = true,
-                                 .keyboardCenteredText = true};
+                                 .keyboardCenteredText = true,
+                                 .coverListItemsPerPage = 3,
+                                 .coverListSpacing = 8};
 }
 
 class Lyra3CoversTheme : public LyraTheme {
