@@ -400,6 +400,10 @@ void FileBrowserActivity::renderCoverList(const ThemeMetrics& metrics, int pageW
       }
     }
 
+    if (showingLoading) {
+      renderer.clearScreen();
+    }
+
     GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
                    ((basepath == "/") ? tr(STR_SD_CARD) : basepath.substr(basepath.rfind('/') + 1)).c_str());
 
