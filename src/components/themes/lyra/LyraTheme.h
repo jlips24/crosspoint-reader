@@ -37,7 +37,7 @@ constexpr ThemeMetrics values = {.batteryWidth = 16,
                                  .keyboardBottomAligned = true,
                                  .keyboardCenteredText = true,
                                  .coverListItemsPerPage = 3,
-                                 .coverListSpacing = 8};  // TODO: Maybe 4?
+                                 .coverListSpacing = 8};
 }
 
 class LyraTheme : public BaseTheme {

@@ -602,19 +602,36 @@ void LyraTheme::drawCoverList(const GfxRenderer& renderer, Rect rect, int itemCo
     const int textX = coverX + coverWidthMax + LyraMetrics::values.verticalSpacing;
     const int textWidth = itemWidth - (textX - x) - hPaddingInSelection;
 
-    // Title
+    // Title and Author
     std::string title = rowTitle(currentIndex);
+    std::string author = rowAuthor(currentIndex);
+
+    const int titleLineHeight = renderer.getLineHeight(UI_12_FONT_ID);
+    const int authorLineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+    const int textSpacing = 4;
+
+    int totalTextHeight = 0;
     if (!title.empty()) {
-      auto truncatedTitle = renderer.truncatedText(UI_12_FONT_ID, title.c_str(), textWidth, EpdFontFamily::BOLD);
-      renderer.drawText(UI_12_FONT_ID, textX, y + 12, truncatedTitle.c_str(), true, EpdFontFamily::BOLD);
+      totalTextHeight += titleLineHeight;
+    }
+    if (!author.empty()) {
+      if (!title.empty()) {
+        totalTextHeight += textSpacing;
+      }
+      totalTextHeight += authorLineHeight;
     }
 
-    // Author
-    std::string author = rowAuthor(currentIndex);
+    int currentTextY = y + (itemHeight - totalTextHeight) / 2;
+
+    if (!title.empty()) {
+      auto truncatedTitle = renderer.truncatedText(UI_12_FONT_ID, title.c_str(), textWidth, EpdFontFamily::BOLD);
+      renderer.drawText(UI_12_FONT_ID, textX, currentTextY, truncatedTitle.c_str(), true, EpdFontFamily::BOLD);
+      currentTextY += titleLineHeight + textSpacing;
+    }
+
     if (!author.empty()) {
       auto truncatedAuthor = renderer.truncatedText(UI_10_FONT_ID, author.c_str(), textWidth);
-      renderer.drawText(UI_10_FONT_ID, textX, y + 12 + renderer.getLineHeight(UI_12_FONT_ID) + 4,
-                        truncatedAuthor.c_str(), true);
+      renderer.drawText(UI_10_FONT_ID, textX, currentTextY, truncatedAuthor.c_str(), true);
     }
   }
 }
