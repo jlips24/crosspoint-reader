@@ -413,13 +413,9 @@ void FileBrowserActivity::renderCoverList(const ThemeMetrics& metrics, int pageW
 
           const std::vector<std::string> thumbPaths = UITheme::getThumbnailCandidates(fullPath, maxWidth, maxHeight);
 
-          bool thumbExists = false;
-          for (const auto& thumbPath : thumbPaths) {
-            if (Storage.exists(thumbPath.c_str())) {
-              thumbExists = true;
-              break;
-            }
-          }
+          const bool thumbExists = std::any_of(begin(thumbPaths), end(thumbPaths), [](const std::string& thumbPath) {
+            return Storage.exists(thumbPath.c_str());
+          });
 
           if (!thumbExists) {
             if (!showingLoading) {
