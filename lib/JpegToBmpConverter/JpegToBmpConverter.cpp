@@ -70,7 +70,7 @@ void emitOutputRow(JpegDrawContext* ctx) {
     for (int x = 0; x < ctx->outWidth; x++) {
       const uint8_t gray = (ctx->rowCount[x] > 0) ? (ctx->rowAccum[x] / ctx->rowCount[x]) : 0;
       const uint8_t bit = ctx->atkinson1BitDitherer ? ctx->atkinson1BitDitherer->processPixel(gray, x)
-                                                     : quantize1bit(gray, x, ctx->currentOutY);
+                                                    : quantize1bit(gray, x, ctx->currentOutY);
       const int byteIndex = x / 8;
       const int bitOffset = 7 - (x % 8);
       ctx->rowBuffer[byteIndex] |= (bit << bitOffset);
@@ -261,7 +261,8 @@ void writeBmpHeader2bit(Print& bmpOut, const int width, const int height) {
   write32(bmpOut, 2835);
   write32(bmpOut, 4);
   write32(bmpOut, 4);
-  uint8_t palette[16] = {0x00, 0x00, 0x00, 0x00, 0x55, 0x55, 0x55, 0x00, 0xAA, 0xAA, 0xAA, 0x00, 0xFF, 0xFF, 0xFF, 0x00};
+  uint8_t palette[16] = {0x00, 0x00, 0x00, 0x00, 0x55, 0x55, 0x55, 0x00,
+                         0xAA, 0xAA, 0xAA, 0x00, 0xFF, 0xFF, 0xFF, 0x00};
   for (const uint8_t i : palette) bmpOut.write(i);
 }
 }  // namespace
@@ -309,8 +310,10 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
   const uint32_t scaleY_fp = (static_cast<uint32_t>(scaledSrcHeight) << 16) / outHeight;
 
   int bytesPerRow = oneBit ? ((outWidth + 31) / 32 * 4) : ((outWidth * 2 + 31) / 32 * 4);
-  if (oneBit) writeBmpHeader1bit(bmpOut, outWidth, outHeight);
-  else writeBmpHeader2bit(bmpOut, outWidth, outHeight);
+  if (oneBit)
+    writeBmpHeader1bit(bmpOut, outWidth, outHeight);
+  else
+    writeBmpHeader2bit(bmpOut, outWidth, outHeight);
 
   auto* ctx = new JpegDrawContext();
   memset(ctx, 0, sizeof(JpegDrawContext));
@@ -326,8 +329,10 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
   ctx->rowAccum = new uint32_t[outWidth]();
   ctx->rowCount = new uint32_t[outWidth]();
 
-  if (oneBit) ctx->atkinson1BitDitherer = new Atkinson1BitDitherer(outWidth);
-  else ctx->atkinsonDitherer = new AtkinsonDitherer(outWidth);
+  if (oneBit)
+    ctx->atkinson1BitDitherer = new Atkinson1BitDitherer(outWidth);
+  else
+    ctx->atkinsonDitherer = new AtkinsonDitherer(outWidth);
 
   g_ctx = ctx;
   bool success = jpeg->decode(0, 0, decodeFlags);
