@@ -181,7 +181,7 @@ int jpegDrawCallbackSequential(JPEGDRAW* pDraw) {
       const int srcXEnd = (static_cast<uint32_t>(outX + 1) * ctx->scaleX_fp) >> 16;
 
       const int intersectXStart = std::max(srcXStart, (int)pDraw->x);
-      const int intersectXEnd = std::min(srcXEnd, (int)(pDraw->x + pDraw->iWidth));
+      const int intersectXEnd = std::min(srcXEnd, (int)(pDraw->x + pDraw->iWidthUsed));
 
       if (intersectXStart < intersectXEnd) {
         for (int srcX = intersectXStart; srcX < intersectXEnd; srcX++) {
@@ -279,25 +279,33 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
 
   const int srcWidth = jpeg->getWidth();
   const int srcHeight = jpeg->getHeight();
+  const bool isProgressive = jpeg->getJPEGType() == JPEG_MODE_PROGRESSIVE;
 
   // Determine optimal internal scaling (1, 2, 4, or 8)
   int decodeFlags = 0;
   int internalScale = 1;
-  const float scaleNeeded = std::min((float)targetWidth / srcWidth, (float)targetHeight / srcHeight);
 
-  if (scaleNeeded <= 0.125f) {
+  if (isProgressive) {
+    // Progressive JPEGs: JPEGDEC forces JPEG_SCALE_EIGHTH internally (DC-only decode)
     decodeFlags = JPEG_SCALE_EIGHTH;
     internalScale = 8;
-  } else if (scaleNeeded <= 0.25f) {
-    decodeFlags = JPEG_SCALE_QUARTER;
-    internalScale = 4;
-  } else if (scaleNeeded <= 0.5f) {
-    decodeFlags = JPEG_SCALE_HALF;
-    internalScale = 2;
+  } else {
+    const float scaleNeeded = std::min((float)targetWidth / srcWidth, (float)targetHeight / srcHeight);
+    if (scaleNeeded <= 0.125f) {
+      decodeFlags = JPEG_SCALE_EIGHTH;
+      internalScale = 8;
+    } else if (scaleNeeded <= 0.25f) {
+      decodeFlags = JPEG_SCALE_QUARTER;
+      internalScale = 4;
+    } else if (scaleNeeded <= 0.5f) {
+      decodeFlags = JPEG_SCALE_HALF;
+      internalScale = 2;
+    }
   }
 
-  const int scaledSrcWidth = srcWidth / internalScale;
-  const int scaledSrcHeight = srcHeight / internalScale;
+  // JPEGDEC uses ceiling division for its internal scaled dimensions
+  const int scaledSrcWidth = (srcWidth + internalScale - 1) / internalScale;
+  const int scaledSrcHeight = (srcHeight + internalScale - 1) / internalScale;
 
   // Calculate final output dimensions based on target
   float finalScale = std::min((float)targetWidth / scaledSrcWidth, (float)targetHeight / scaledSrcHeight);
