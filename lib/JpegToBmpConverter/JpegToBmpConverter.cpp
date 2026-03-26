@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 #include "BitmapHelpers.h"
 
@@ -269,7 +270,11 @@ void writeBmpHeader2bit(Print& bmpOut, const int width, const int height) {
 
 bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bmpOut, int targetWidth, int targetHeight,
                                                      bool oneBit, bool crop) {
-  auto* jpeg = new JPEGDEC();
+  auto* jpeg = new (std::nothrow) JPEGDEC();
+  if (!jpeg) {
+    LOG_ERR("JPG", "Failed to allocate JPEGDEC");
+    return false;
+  }
   if (!jpeg->open(&jpegFile, static_cast<int>(jpegFile.size()), nullptr, jpegReadCallback, jpegSeekCallback,
                   jpegDrawCallbackSequential)) {
     LOG_ERR("JPG", "Failed to open JPEG");
@@ -323,7 +328,13 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
   else
     writeBmpHeader2bit(bmpOut, outWidth, outHeight);
 
-  auto* ctx = new JpegDrawContext();
+  auto* ctx = new (std::nothrow) JpegDrawContext();
+  if (!ctx) {
+    LOG_ERR("JPG", "Failed to allocate JpegDrawContext");
+    jpeg->close();
+    delete jpeg;
+    return false;
+  }
   memset(ctx, 0, sizeof(JpegDrawContext));
   ctx->outWidth = outWidth;
   ctx->outHeight = outHeight;
@@ -334,19 +345,27 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
   ctx->bytesPerRow = bytesPerRow;
   ctx->nextOutY_srcStart = scaleY_fp;
   ctx->rowBuffer = static_cast<uint8_t*>(malloc(bytesPerRow));
-  ctx->rowAccum = new uint32_t[outWidth]();
-  ctx->rowCount = new uint32_t[outWidth]();
+  ctx->rowAccum = new (std::nothrow) uint32_t[outWidth]();
+  ctx->rowCount = new (std::nothrow) uint32_t[outWidth]();
 
   if (oneBit)
-    ctx->atkinson1BitDitherer = new Atkinson1BitDitherer(outWidth);
+    ctx->atkinson1BitDitherer = new (std::nothrow) Atkinson1BitDitherer(outWidth);
   else
-    ctx->atkinsonDitherer = new AtkinsonDitherer(outWidth);
+    ctx->atkinsonDitherer = new (std::nothrow) AtkinsonDitherer(outWidth);
+
+  bool success = false;
+  if (!ctx->rowBuffer || !ctx->rowAccum || !ctx->rowCount || (oneBit && !ctx->atkinson1BitDitherer) ||
+      (!oneBit && !ctx->atkinsonDitherer)) {
+    LOG_ERR("JPG", "Failed to allocate buffers/ditherers");
+    goto cleanup;
+  }
 
   g_ctx = ctx;
-  bool success = jpeg->decode(0, 0, decodeFlags);
+  success = jpeg->decode(0, 0, decodeFlags);
   if (success && ctx->currentOutY < outHeight) emitOutputRow(ctx);
   g_ctx = nullptr;
 
+cleanup:
   delete[] ctx->rowAccum;
   delete[] ctx->rowCount;
   delete ctx->atkinsonDitherer;
