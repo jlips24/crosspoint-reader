@@ -21,7 +21,11 @@ constexpr unsigned long GO_HOME_MS = 1000;
 
 std::string getFileName(std::string filename) {
   if (filename.back() == '/') {
-    return filename.substr(0, filename.length() - 1);
+    filename.pop_back();
+    if (!UITheme::getInstance().getTheme().showsFileIcons()) {
+      return "[" + filename + "]";
+    }
+    return filename;
   }
   const auto pos = filename.rfind('.');
   return filename.substr(0, pos);
@@ -341,18 +345,6 @@ void FileBrowserActivity::loop() {
     selectorIndex = ButtonNavigator::previousPageIndex(static_cast<int>(selectorIndex), listSize, pageItems);
     requestUpdate();
   });
-}
-
-std::string getFileName(std::string filename) {
-  if (filename.back() == '/') {
-    filename.pop_back();
-    if (!UITheme::getInstance().getTheme().showsFileIcons()) {
-      return "[" + filename + "]";
-    }
-    return filename;
-  }
-  const auto pos = filename.rfind('.');
-  return filename.substr(0, pos);
 }
 
 void FileBrowserActivity::render(RenderLock&&) {
