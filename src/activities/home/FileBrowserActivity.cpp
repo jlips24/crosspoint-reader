@@ -11,6 +11,7 @@
 #include <cassert>
 
 #include "../util/ConfirmationActivity.h"
+#include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -96,7 +97,7 @@ void FileBrowserActivity::loadFiles() {
   char name[500];
   for (auto file = root.openNextFile(); file; file = root.openNextFile()) {
     file.getName(name, sizeof(name));
-    if (name[0] == '.' || strcmp(name, "System Volume Information") == 0) {
+    if ((!SETTINGS.showHiddenFiles && name[0] == '.') || strcmp(name, "System Volume Information") == 0) {
       file.close();
       continue;
     }
@@ -340,6 +341,18 @@ void FileBrowserActivity::loop() {
     selectorIndex = ButtonNavigator::previousPageIndex(static_cast<int>(selectorIndex), listSize, pageItems);
     requestUpdate();
   });
+}
+
+std::string getFileName(std::string filename) {
+  if (filename.back() == '/') {
+    filename.pop_back();
+    if (!UITheme::getInstance().getTheme().showsFileIcons()) {
+      return "[" + filename + "]";
+    }
+    return filename;
+  }
+  const auto pos = filename.rfind('.');
+  return filename.substr(0, pos);
 }
 
 void FileBrowserActivity::render(RenderLock&&) {

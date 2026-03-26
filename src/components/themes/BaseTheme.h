@@ -150,6 +150,7 @@ class BaseTheme {
   virtual void drawHelpText(const GfxRenderer& renderer, Rect rect, const char* label) const;
   virtual void drawTextField(const GfxRenderer& renderer, Rect rect, const int textWidth) const;
   virtual void drawKeyboardKey(const GfxRenderer& renderer, Rect rect, const char* label, const bool isSelected) const;
+  virtual bool showsFileIcons() const { return false; }
 
  protected:
   virtual void drawCoverThumbnail(const GfxRenderer& renderer, int x, int y, int maxWidth, int maxHeight,
